@@ -38,7 +38,13 @@ class Nodelet : public nodelet::Nodelet {
 
   // NOTE planning or fake target
   
-  bool fake_ = false;
+  //bool fake_ = false;
+//---------------------------------------------------------
+  enum class Mode { WAYPOINT, TRACKING };
+  Mode mode_ = Mode::WAYPOINT;
+  double target_timeout_ = 2.0;
+  std::atomic<double> last_target_time_ = ATOMIC_VAR_INIT(0.0);
+//---------------------------------------------------------
   Eigen::Vector3d goal_;
   Eigen::Vector3d land_p_;
   Eigen::Quaterniond land_q_;
@@ -107,7 +113,7 @@ class Nodelet : public nodelet::Nodelet {
   }
 
   void triger_callback(const geometry_msgs::PoseStampedConstPtr& msgPtr) {
-    goal_ << msgPtr->pose.position.x, msgPtr->pose.position.y, 0.9;
+    goal_ << msgPtr->pose.position.x, msgPtr->pose.position.y, msgPtr->pose.position.z;
     triger_received_ = true;
   }
 
@@ -135,6 +141,7 @@ class Nodelet : public nodelet::Nodelet {
       ;
     target_msg_ = *msgPtr;
     target_received_ = true;
+    last_target_time_.store(ros::Time::now().toSec());
     target_lock_.clear();
   }
 
@@ -144,6 +151,47 @@ class Nodelet : public nodelet::Nodelet {
     map_msg_ = *msgPtr;
     map_received_ = true;
     gridmap_lock_.clear();
+  }
+
+    bool targetAvailable() {
+    if (!target_received_) {
+      return false;
+    }
+    double last_stamp = last_target_time_.load();
+    if (last_stamp <= 0.0) {
+      return false;
+    }
+    if (ros::Time::now().toSec() - last_stamp > target_timeout_) {
+      return false;
+    }
+    return true;
+  }
+
+  void updateMode() {
+    bool has_target = targetAvailable();
+    Mode desired_mode = has_target ? Mode::TRACKING : Mode::WAYPOINT;
+    if (desired_mode != mode_) {
+      mode_ = desired_mode;
+      force_hover_ = true;
+      wait_hover_ = true;
+      if (mode_ == Mode::TRACKING) {
+        ROS_INFO("[planner] switch to tracking mode");
+      } else {
+        ROS_INFO("[planner] switch to waypoint mode");
+      }
+    }
+    if (!has_target) {
+      target_received_ = false;
+    }
+  }
+
+  void main_timer_callback(const ros::TimerEvent& event) {
+    updateMode();
+    if (mode_ == Mode::TRACKING) {
+      plan_timer_callback(event);
+    } else {
+      fake_timer_callback(event);
+    }
   }
 
   // NOTE main callback
@@ -172,7 +220,7 @@ class Nodelet : public nodelet::Nodelet {
       ROS_INFO("No Triger"); 
       return;
     }
-    if (!target_received_) {
+    if (!targetAvailable()) {
         ROS_INFO("No Target");
       return;
     }
@@ -495,7 +543,7 @@ class Nodelet : public nodelet::Nodelet {
       }
     }
     // NOTE determin whether to pub hover
-    if ((goal_ - odom_p).norm() < tracking_dist_ + tolerance_d_ && odom_v.norm() < 0.1) {
+    if ((goal_ - odom_p).norm() < 0 + tolerance_d_ && odom_v.norm() < 0.1) {
       if (!wait_hover_) {
         pub_hover_p(odom_p, ros::Time::now());
         wait_hover_ = true;
@@ -754,7 +802,8 @@ class Nodelet : public nodelet::Nodelet {
     nh.getParam("tracking_dist", tracking_dist_);
     nh.getParam("tolerance_d", tolerance_d_);
     nh.getParam("debug", debug_);
-    nh.getParam("fake", fake_);
+
+    nh.getParam("target_timeout", target_timeout_);
 
     gridmapPtr_ = std::make_shared<mapping::OccGridMap>();
     envPtr_ = std::make_shared<env::Env>(nh, gridmapPtr_);
@@ -774,10 +823,13 @@ class Nodelet : public nodelet::Nodelet {
       gridmapPtr_->from_msg(replanStateMsg_.occmap);
       prePtr_->setMap(*gridmapPtr_);
       std::cout << "plan state: " << replanStateMsg_.state << std::endl;
-    } else if (fake_) {
-      plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::fake_timer_callback, this);
-    } else {
-      plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::plan_timer_callback, this);
+    // } else if (fake_) {
+    //   plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::fake_timer_callback, this);
+    } 
+    else 
+    {
+      //plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::plan_timer_callback, this);
+      plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::main_timer_callback, this);
     }
     gridmap_sub_ = nh.subscribe<quadrotor_msgs::OccMap3d>("gridmap_inflate", 1, &Nodelet::gridmap_callback, this, ros::TransportHints().tcpNoDelay());
     odom_sub_ = nh.subscribe<nav_msgs::Odometry>("odom", 10, &Nodelet::odom_callback, this, ros::TransportHints().tcpNoDelay());

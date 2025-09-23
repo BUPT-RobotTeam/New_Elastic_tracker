@@ -13,7 +13,7 @@
         <remap from="mavros/battery" to="/$(arg namespace)/mavros/battery" />
         <remap from="mavros/setpoint_raw/attitude" to="/$(arg namespace)/mavros/setpoint_raw/attitude" />
         
-        <remap from="traj_start_trigger" to="/triger" />
+        <remap from="traj_start_trigger" to="/move_base_simple/goal" />
 
         <remap from="debugPx4ctrl" to="/$(arg namespace)/debugPx4ctrl" />
         <remap from="mavros/set_mode" to="/$(arg namespace)/mavros/set_mode" />
