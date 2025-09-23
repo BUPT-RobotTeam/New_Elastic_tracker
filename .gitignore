@@ -1,0 +1,76 @@
+# ROS工作空间通用.gitignore
+
+# 编译生成目录
+build/
+devel/
+install/
+
+# Catkin工具生成的CMake配置
+CATKIN_IGNORE
+.catkin_workspace
+.catkin
+
+# 日志文件
+logs/
+*.log
+*.bag
+*.bag.active
+
+# 动态生成的消息/服务文件
+**/msg_gen/
+**/srv_gen/
+**/action_gen/
+**/msg/*.h
+**/srv/*.h
+**/action/*.h
+
+# Python字节码文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 编译临时文件
+*.o
+*.so
+*.a
+*.la
+*.lo
+*.Plo
+*.Po
+*.gch
+*.pch
+.deps/
+.libs/
+Makefile
+Makefile.in
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# IDE配置文件
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+*.project
+*.cproject
+*.settings/
+
+# 自定义安装或第三方库
+thirdparty/
+external/
+vendor/
+
+# ROS launch生成的临时文件
+*.launch.py
+
+# 环境变量文件
+.env
+.env.local
+
+# 其他临时文件
+*~
+tmp/
+temp/
