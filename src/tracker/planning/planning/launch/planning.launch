@@ -47,7 +47,7 @@
   </node>
   <node pkg="planning" name="traj_server" type="traj_server" output="screen">
     <remap from="~position_cmd" to="/position_cmd"/>
-    <remap from="pose_cmd" to="/xtdrone/iris_0/cmd_pose_enu"/>
+    <remap from="~pose_cmd" to="/xtdrone/iris_0/cmd_pose_enu"/>
     <remap from="~trajectory" to="trajectory"/>
     <remap from="~heartbeat" to="heartbeat"/>
     <param name="time_forward" value="1.0" type="double"/>

@@ -41,6 +41,7 @@ void publish_cmd(int traj_id,
   cmd.yaw = y;
   cmd.yaw_dot = yd;
   pos_cmd_pub_.publish(cmd);
+  ROS_INFO("[server]position_cmd");
 //--------------------------------------------------
   geometry_msgs::Pose pose;
   pose.position.x = p(0);
@@ -52,6 +53,7 @@ void publish_cmd(int traj_id,
   pose.orientation.y = 0.0;
   pose.orientation.z = std::sin(half_yaw);
   pose_cmd_pub_.publish(pose);
+  ROS_INFO("[server]pose_cmd");
 
   //-----------------------------------------
   last_p_ = p;
@@ -157,7 +159,7 @@ int main(int argc, char **argv) {
   ros::Subscriber heartbeat_sub = nh.subscribe("heartbeat", 10, heartbeatCallback);
 
   pos_cmd_pub_ = nh.advertise<quadrotor_msgs::PositionCommand>("position_cmd", 50);
-  pose_cmd_pub_ = nh.advertise<geometry_msgs::Pose>("/pose_cmd", 50);
+  pose_cmd_pub_ = nh.advertise<geometry_msgs::Pose>("pose_cmd", 50);
   ros::Timer cmd_timer = nh.createTimer(ros::Duration(0.01), cmdCallback);
 
   ros::Duration(1.0).sleep();
