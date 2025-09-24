@@ -37,6 +37,8 @@
     <param name="tracking_dur" value="3.0"/>
     <param name="tracking_dt" value="0.2"/>
     <param name="debug" value="false"/>
+    <param name="target_timeout" value="2"/>
+    <!-- <param name="waypoint_stop_dist" value="0"/> -->
 
     <param name="prediction/rho_a" value="1.0"/>
     <param name="prediction/vmax" value="4.0"/>

@@ -497,9 +497,7 @@ class Nodelet : public nodelet::Nodelet {
     Eigen::Vector3d odom_v(odom_msg.twist.twist.linear.x,
                            odom_msg.twist.twist.linear.y,
                            odom_msg.twist.twist.linear.z);
-    if (!triger_received_) {
-      return;
-    }
+
     // NOTE force-hover: waiting for the speed of drone small enough
     if (force_hover_ && odom_v.norm() > 0.1) {
       return;
@@ -543,7 +541,7 @@ class Nodelet : public nodelet::Nodelet {
       }
     }
     // NOTE determin whether to pub hover
-    if ((goal_ - odom_p).norm() < 0 + tolerance_d_ && odom_v.norm() < 0.1) {
+    if ((goal_ - odom_p).norm() < tracking_dist_ + tolerance_d_ && odom_v.norm() < 0.1) {
       if (!wait_hover_) {
         pub_hover_p(odom_p, ros::Time::now());
         wait_hover_ = true;
