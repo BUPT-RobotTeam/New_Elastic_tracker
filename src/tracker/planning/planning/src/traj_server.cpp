@@ -4,10 +4,13 @@
 #include <ros/ros.h>
 #include <std_msgs/Empty.h>
 #include <visualization_msgs/Marker.h>
+#include <cmath>
 
+#include <geometry_msgs/Pose.h>
 #include <traj_opt/poly_traj_utils.hpp>
 
 ros::Publisher pos_cmd_pub_;
+ros::Publisher pose_cmd_pub_;
 ros::Time heartbeat_time_;
 bool receive_traj_ = false;
 bool flight_start_ = false;
@@ -38,6 +41,19 @@ void publish_cmd(int traj_id,
   cmd.yaw = y;
   cmd.yaw_dot = yd;
   pos_cmd_pub_.publish(cmd);
+//--------------------------------------------------
+  geometry_msgs::Pose pose;
+  pose.position.x = p(0);
+  pose.position.y = p(1);
+  pose.position.z = p(2);
+  const double half_yaw = y * 0.5;
+  pose.orientation.w = std::cos(half_yaw);
+  pose.orientation.x = 0.0;
+  pose.orientation.y = 0.0;
+  pose.orientation.z = std::sin(half_yaw);
+  pose_cmd_pub_.publish(pose);
+
+  //-----------------------------------------
   last_p_ = p;
 }
 
@@ -141,7 +157,7 @@ int main(int argc, char **argv) {
   ros::Subscriber heartbeat_sub = nh.subscribe("heartbeat", 10, heartbeatCallback);
 
   pos_cmd_pub_ = nh.advertise<quadrotor_msgs::PositionCommand>("position_cmd", 50);
-
+  pose_cmd_pub_ = nh.advertise<geometry_msgs::Pose>("/pose_cmd", 50);
   ros::Timer cmd_timer = nh.createTimer(ros::Duration(0.01), cmdCallback);
 
   ros::Duration(1.0).sleep();

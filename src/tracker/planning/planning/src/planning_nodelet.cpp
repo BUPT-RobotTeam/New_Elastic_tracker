@@ -11,7 +11,10 @@
 #include <traj_opt/traj_opt.h>
 
 #include <Eigen/Core>
+#include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <limits>
 #include <env/env.hpp>
 #include <prediction/prediction.hpp>
 #include <thread>
@@ -36,15 +39,80 @@ class Nodelet : public nodelet::Nodelet {
   std::shared_ptr<traj_opt::TrajOpt> trajOptPtr_;
   std::shared_ptr<prediction::Predict> prePtr_;
 
-  // NOTE planning or fake target
-  
-  //bool fake_ = false;
-//---------------------------------------------------------
   enum class Mode { WAYPOINT, TRACKING };
+
+  struct TargetSnapshot {
+    bool received = false;
+    bool fresh = false;
+    double age = std::numeric_limits<double>::infinity();
+    double speed_sq = 0.0;
+    nav_msgs::Odometry msg;
+  };
+
+  struct PlanningSnapshot {
+    ros::Time stamp;
+    nav_msgs::Odometry odom;
+    quadrotor_msgs::OccMap3d map;
+    TargetSnapshot target;
+    bool has_goal = false;
+    bool land_trigger_active = false;
+  };
+
+  class ModeManager {
+   public:
+    ModeManager() = default;
+
+    Mode decide(bool target_fresh, bool allow_tracking, bool land_triggered,
+                Mode current, bool& changed) const {
+      Mode desired = Mode::WAYPOINT;
+      if (land_triggered) {
+        desired = Mode::TRACKING;
+      } else if (target_fresh && allow_tracking) {
+        desired = Mode::TRACKING;
+      }
+      changed = desired != current;
+      return desired;
+    }
+  };
+
+  class BehaviorStrategy {
+   public:
+    explicit BehaviorStrategy(Nodelet& node) : node_(node) {}
+    virtual ~BehaviorStrategy() = default;
+
+    virtual bool ready(const PlanningSnapshot& snapshot) const = 0;
+    virtual void run(const PlanningSnapshot& snapshot) = 0;
+
+   protected:
+    Nodelet& node_;
+  };
+
+  class TrackingStrategy : public BehaviorStrategy {
+   public:
+    explicit TrackingStrategy(Nodelet& node) : BehaviorStrategy(node) {}
+
+    bool ready(const PlanningSnapshot& snapshot) const override;
+    void run(const PlanningSnapshot& snapshot) override;
+  };
+
+  class WaypointStrategy : public BehaviorStrategy {
+   public:
+    explicit WaypointStrategy(Nodelet& node) : BehaviorStrategy(node) {}
+
+    bool ready(const PlanningSnapshot& snapshot) const override;
+    void run(const PlanningSnapshot& snapshot) override;
+  };
+
   Mode mode_ = Mode::WAYPOINT;
+  ModeManager mode_manager_;
   double target_timeout_ = 2.0;
+  double target_speed_threshold_ = 0.2;
+  double target_speed_threshold_sq_ = 0.04;
+  double tracking_height_offset_ = 1.0;
   std::atomic<double> last_target_time_ = ATOMIC_VAR_INIT(0.0);
-//---------------------------------------------------------
+  std::atomic<double> last_target_speed_sq_ = ATOMIC_VAR_INIT(0.0);
+  TrackingStrategy tracking_strategy_{*this};
+  WaypointStrategy waypoint_strategy_{*this};
   Eigen::Vector3d goal_;
   Eigen::Vector3d land_p_;
   Eigen::Quaterniond land_q_;
@@ -56,6 +124,7 @@ class Nodelet : public nodelet::Nodelet {
   quadrotor_msgs::OccMap3d occmap_msg_;
 
   double tracking_dur_, tracking_dist_, tolerance_d_;
+  double waypoint_stop_dist_ = 0.0;
 
   Trajectory traj_poly_;
   ros::Time replan_stamp_;
@@ -112,8 +181,16 @@ class Nodelet : public nodelet::Nodelet {
     traj_pub_.publish(traj_msg);
   }
 
+  //bool captureSnapshot(PlanningSnapshot& snapshot);
+  //void updateMode(const PlanningSnapshot& snapshot);
+  //void executeTracking(const PlanningSnapshot& snapshot);
+  //void executeWaypoint(const PlanningSnapshot& snapshot);
+  //Eigen::MatrixXd buildInitialState(const Eigen::Vector3d& odom_p,
+                                    // const Eigen::Vector3d& odom_v,
+                                    // const ros::Time& stamp, ros::Time& replan_stamp);
+
   void triger_callback(const geometry_msgs::PoseStampedConstPtr& msgPtr) {
-    goal_ << msgPtr->pose.position.x, msgPtr->pose.position.y, msgPtr->pose.position.z;
+    goal_ << msgPtr->pose.position.x, msgPtr->pose.position.y, 0.9;
     triger_received_ = true;
   }
 
@@ -142,6 +219,10 @@ class Nodelet : public nodelet::Nodelet {
     target_msg_ = *msgPtr;
     target_received_ = true;
     last_target_time_.store(ros::Time::now().toSec());
+    const Eigen::Vector3d target_v(msgPtr->twist.twist.linear.x,
+                                   msgPtr->twist.twist.linear.y,
+                                   msgPtr->twist.twist.linear.z);
+    last_target_speed_sq_.store(target_v.squaredNorm());
     target_lock_.clear();
   }
 
@@ -153,24 +234,50 @@ class Nodelet : public nodelet::Nodelet {
     gridmap_lock_.clear();
   }
 
-    bool targetAvailable() {
-    if (!target_received_) {
+  bool captureSnapshot(PlanningSnapshot& snapshot) {
+    if (!odom_received_ || !map_received_) {
       return false;
     }
+
+    snapshot.stamp = ros::Time::now();
+
+    while (odom_lock_.test_and_set())
+      ;
+    snapshot.odom = odom_msg_;
+    odom_lock_.clear();
+
+    while (gridmap_lock_.test_and_set())
+      ;
+    snapshot.map = map_msg_;
+    gridmap_lock_.clear();
+
+    snapshot.has_goal = triger_received_.load();
+    snapshot.land_trigger_active = land_triger_received_.load();
+
+    snapshot.target.received = target_received_.load();
     double last_stamp = last_target_time_.load();
-    if (last_stamp <= 0.0) {
-      return false;
+    if (snapshot.target.received && last_stamp > 0.0) {
+      snapshot.target.age = snapshot.stamp.toSec() - last_stamp;
+      snapshot.target.speed_sq = last_target_speed_sq_.load();
+      if (snapshot.target.age <= target_timeout_) {
+        snapshot.target.fresh = true;
+        while (target_lock_.test_and_set())
+          ;
+        snapshot.target.msg = target_msg_;
+        target_lock_.clear();
+      }
     }
-    if (ros::Time::now().toSec() - last_stamp > target_timeout_) {
-      return false;
-    }
+
     return true;
   }
 
-  void updateMode() {
-    bool has_target = targetAvailable();
-    Mode desired_mode = has_target ? Mode::TRACKING : Mode::WAYPOINT;
-    if (desired_mode != mode_) {
+  void updateMode(const PlanningSnapshot& snapshot) {
+    bool allow_tracking = snapshot.land_trigger_active ||
+                          snapshot.target.speed_sq >= target_speed_threshold_sq_;
+    bool changed = false;
+    Mode desired_mode = mode_manager_.decide(snapshot.target.fresh, allow_tracking,
+                                             snapshot.land_trigger_active, mode_, changed);
+    if (changed) {
       mode_ = desired_mode;
       force_hover_ = true;
       wait_hover_ = true;
@@ -180,32 +287,61 @@ class Nodelet : public nodelet::Nodelet {
         ROS_INFO("[planner] switch to waypoint mode");
       }
     }
-    if (!has_target) {
+
+    if (!snapshot.target.fresh) {
       target_received_ = false;
+      last_target_speed_sq_.store(0.0);
     }
   }
 
   void main_timer_callback(const ros::TimerEvent& event) {
-    updateMode();
-    if (mode_ == Mode::TRACKING) {
-      plan_timer_callback(event);
-    } else {
-      fake_timer_callback(event);
-    }
-  }
-
-  // NOTE main callback
-  void plan_timer_callback(const ros::TimerEvent& event) {
     heartbeat_pub_.publish(std_msgs::Empty());
-    if (!odom_received_ || !map_received_) {
-        ROS_INFO("NO Odom or No Map");
+
+    PlanningSnapshot snapshot;
+    if (!captureSnapshot(snapshot)) {
       return;
     }
-    // obtain state of odom
-    while (odom_lock_.test_and_set())
-      ;
-    auto odom_msg = odom_msg_;
-    odom_lock_.clear();
+
+    updateMode(snapshot);
+
+    BehaviorStrategy* strategy =
+        mode_ == Mode::TRACKING ? static_cast<BehaviorStrategy*>(&tracking_strategy_)
+                                 : static_cast<BehaviorStrategy*>(&waypoint_strategy_);
+
+    if (!strategy->ready(snapshot)) {
+      return;
+    }
+
+    strategy->run(snapshot);
+  }
+
+  Eigen::MatrixXd buildInitialState(const Eigen::Vector3d& odom_p,
+                                    const Eigen::Vector3d& odom_v,
+                                    const ros::Time& stamp, ros::Time& replan_stamp) {
+    Eigen::MatrixXd iniState;
+    iniState.setZero(3, 3);
+    replan_stamp = stamp + ros::Duration(0.03);
+    double replan_t = (replan_stamp - replan_stamp_).toSec();
+    if (force_hover_ || replan_t > traj_poly_.getTotalDuration()) {
+      iniState.col(0) = odom_p;
+      iniState.col(1) = odom_v;
+    } else {
+      iniState.col(0) = traj_poly_.getPos(replan_t);
+      iniState.col(1) = traj_poly_.getVel(replan_t);
+      iniState.col(2) = traj_poly_.getAcc(replan_t);
+    }
+    replanStateMsg_.header.stamp = stamp;
+    replanStateMsg_.iniState.resize(9);
+    Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.iniState.data(), 3, 3) = iniState;
+    return iniState;
+  }
+
+  void executeTracking(const PlanningSnapshot& snapshot) {
+    if (!snapshot.target.fresh) {
+      return;
+    }
+
+    const auto& odom_msg = snapshot.odom;
     Eigen::Vector3d odom_p(odom_msg.pose.pose.position.x,
                            odom_msg.pose.pose.position.y,
                            odom_msg.pose.pose.position.z);
@@ -216,147 +352,90 @@ class Nodelet : public nodelet::Nodelet {
                               odom_msg.pose.pose.orientation.x,
                               odom_msg.pose.pose.orientation.y,
                               odom_msg.pose.pose.orientation.z);
-    if (!triger_received_) {
-      ROS_INFO("No Triger"); 
-      return;
-    }
-    if (!targetAvailable()) {
-        ROS_INFO("No Target");
-      return;
-    }
-    // NOTE obtain state of target
-    while (target_lock_.test_and_set())
-      ;
-    replanStateMsg_.target = target_msg_;
-    target_lock_.clear();
-    Eigen::Vector3d target_p(replanStateMsg_.target.pose.pose.position.x,
-                             replanStateMsg_.target.pose.pose.position.y,
-                             replanStateMsg_.target.pose.pose.position.z);
-    // Eigen::Vector3d target_v(replanStateMsg_.target.twist.twist.linear.x,
-    //                          replanStateMsg_.target.twist.twist.linear.y,
-    //                          replanStateMsg_.target.twist.twist.linear.z);
 
-    Eigen::Vector3d target_v(0.0,0.0,0.0);
-    Eigen::Quaterniond target_q;
-    target_q.w() = replanStateMsg_.target.pose.pose.orientation.w;
-    target_q.x() = replanStateMsg_.target.pose.pose.orientation.x;
-    target_q.y() = replanStateMsg_.target.pose.pose.orientation.y;
-    target_q.z() = replanStateMsg_.target.pose.pose.orientation.z;
-
-    // NOTE force-hover: waiting for the speed of drone small enough
     if (force_hover_ && odom_v.norm() > 0.1) {
       return;
     }
 
-    // NOTE just for landing on the car!
-    if (land_triger_received_) {
-      if (std::fabs((target_p - odom_p).norm() < 0.1 && odom_v.norm() < 0.1 && target_v.norm() < 0.2)) {
+    replanStateMsg_.target = snapshot.target.msg;
+
+    Eigen::Vector3d target_p(snapshot.target.msg.pose.pose.position.x,
+                             snapshot.target.msg.pose.pose.position.y,
+                             snapshot.target.msg.pose.pose.position.z);
+    Eigen::Vector3d target_v(snapshot.target.msg.twist.twist.linear.x,
+                             snapshot.target.msg.twist.twist.linear.y,
+                             snapshot.target.msg.twist.twist.linear.z);
+    Eigen::Quaterniond target_q(snapshot.target.msg.pose.pose.orientation.w,
+                                snapshot.target.msg.pose.pose.orientation.x,
+                                snapshot.target.msg.pose.pose.orientation.y,
+                                snapshot.target.msg.pose.pose.orientation.z);
+
+    if (snapshot.land_trigger_active) {
+      if ((target_p - odom_p).norm() < 0.1 && odom_v.norm() < 0.1 && target_v.norm() < 0.2) {
         if (!wait_hover_) {
-          pub_hover_p(odom_p, ros::Time::now());
+          pub_hover_p(odom_p, snapshot.stamp);
           wait_hover_ = true;
         }
         ROS_WARN("[planner] HOVERING...");
         return;
       }
-      // TODO get the orientation fo target and calculate the pose of landing point
       target_p = target_p + target_q * land_p_;
       wait_hover_ = false;
     } else {
-      // NOTE determin whether to replan
+      target_p.z() += tracking_height_offset_;
       Eigen::Vector3d dp = target_p - odom_p;
-      // std::cout << "dist : " << dp.norm() << std::endl;
       double desired_yaw = std::atan2(dp.y(), dp.x());
-      Eigen::Vector3d project_yaw = odom_q.toRotationMatrix().col(0);  // NOTE ZYX
+      Eigen::Vector3d project_yaw = odom_q.toRotationMatrix().col(0);
       double now_yaw = std::atan2(project_yaw.y(), project_yaw.x());
-      if (std::fabs((target_p - odom_p).norm() - tracking_dist_) < tolerance_d_ &&
-          odom_v.norm() < 0.1 && target_v.norm() < 0.2 &&
-          std::fabs(desired_yaw - now_yaw) < 0.5) {
+      if (std::fabs(dp.norm() - tracking_dist_) < tolerance_d_ && odom_v.norm() < 0.1 &&
+          target_v.norm() < 0.2 && std::fabs(desired_yaw - now_yaw) < 0.5) {
         if (!wait_hover_) {
-          pub_hover_p(odom_p, ros::Time::now());
+          pub_hover_p(odom_p, snapshot.stamp);
           wait_hover_ = true;
         }
         ROS_WARN("[planner] HOVERING...");
         replanStateMsg_.state = -1;
         replanState_pub_.publish(replanStateMsg_);
         return;
-      } else {
-        wait_hover_ = false;
       }
+      wait_hover_ = false;
     }
 
-    // NOTE obtain map
-    while (gridmap_lock_.test_and_set())
-      ;
-    gridmapPtr_->from_msg(map_msg_);
-    replanStateMsg_.occmap = map_msg_;
-    gridmap_lock_.clear();
+    gridmapPtr_->from_msg(snapshot.map);
+    replanStateMsg_.occmap = snapshot.map;
     prePtr_->setMap(*gridmapPtr_);
 
-    // visualize the ray from drone to target
     if (envPtr_->checkRayValid(odom_p, target_p)) {
       visPtr_->visualize_arrow(odom_p, target_p, "ray", visualization::yellow);
     } else {
       visPtr_->visualize_arrow(odom_p, target_p, "ray", visualization::red);
     }
 
-    // NOTE prediction
     std::vector<Eigen::Vector3d> target_predcit;
-    // ros::Time t_start = ros::Time::now();
     bool generate_new_traj_success = prePtr_->predict(target_p, target_v, target_predcit);
-    // ros::Time t_stop = ros::Time::now();
-    // std::cout << "predict costs: " << (t_stop - t_start).toSec() * 1e3 << "ms" << std::endl;
     if (generate_new_traj_success) {
       Eigen::Vector3d observable_p = target_predcit.back();
       visPtr_->visualize_path(target_predcit, "car_predict");
       std::vector<Eigen::Vector3d> observable_margin;
       for (double theta = 0; theta <= 2 * M_PI; theta += 0.01) {
-        observable_margin.emplace_back(observable_p + tracking_dist_ * Eigen::Vector3d(cos(theta), sin(theta), 0));
+        observable_margin.emplace_back(observable_p +
+                                       tracking_dist_ * Eigen::Vector3d(cos(theta), sin(theta), 0));
       }
       visPtr_->visualize_path(observable_margin, "observable_margin");
     }
 
-    // NOTE replan state
-    Eigen::MatrixXd iniState;
-    iniState.setZero(3, 3);
-    ros::Time replan_stamp = ros::Time::now() + ros::Duration(0.03);
-    double replan_t = (replan_stamp - replan_stamp_).toSec();
-    if (force_hover_ || replan_t > traj_poly_.getTotalDuration()) {
-      // should replan from the hover state
-      iniState.col(0) = odom_p;
-      iniState.col(1) = odom_v;
-    } else {
-      // should replan from the last trajectory
-      iniState.col(0) = traj_poly_.getPos(replan_t);
-      iniState.col(1) = traj_poly_.getVel(replan_t);
-      iniState.col(2) = traj_poly_.getAcc(replan_t);
-    }
-    replanStateMsg_.header.stamp = ros::Time::now();
-    replanStateMsg_.iniState.resize(9);
-    Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.iniState.data(), 3, 3) = iniState;
+    ros::Time replan_stamp;
+    Eigen::MatrixXd iniState = buildInitialState(odom_p, odom_v, snapshot.stamp, replan_stamp);
 
-    // NOTE path searching
     Eigen::Vector3d p_start = iniState.col(0);
     std::vector<Eigen::Vector3d> path, way_pts;
 
-    // NOTE calculate time of path searching, corridor generation and optimization
-
-    // static double t_path_ = 0;
-    // static double t_corridor_ = 0;
-    // static double t_optimization_ = 0;
-    // static int times_path_ = 0;
-    // static int times_corridor_ = 0;
-    // static int times_optimization_ = 0;
-    // double t_path = 0;
-
     if (generate_new_traj_success) {
-      // ros::Time t_front0 = ros::Time::now();
-      if (land_triger_received_) {
+      if (snapshot.land_trigger_active) {
         generate_new_traj_success = envPtr_->short_astar(p_start, target_p, path);
       } else {
         generate_new_traj_success = envPtr_->findVisiblePath(p_start, target_predcit, way_pts, path);
       }
-      // ros::Time t_end0 = ros::Time::now();
-      // t_path += (t_end0 - t_front0).toSec() * 1e3;
     }
 
     std::vector<Eigen::Vector3d> visible_ps;
@@ -364,77 +443,46 @@ class Nodelet : public nodelet::Nodelet {
     Trajectory traj;
     if (generate_new_traj_success) {
       visPtr_->visualize_path(path, "astar");
-      if (land_triger_received_) {
+      if (snapshot.land_trigger_active) {
         for (const auto& p : target_predcit) {
           path.push_back(p);
         }
       } else {
-        // NOTE generate visible regions
         target_predcit.pop_back();
         way_pts.pop_back();
-        // ros::Time t_front1 = ros::Time::now();
-        envPtr_->generate_visible_regions(target_predcit, way_pts,
-                                          visible_ps, thetas);
-        // ros::Time t_end1 = ros::Time::now();
-        // t_path += (t_end1 - t_front1).toSec() * 1e3;
+        envPtr_->generate_visible_regions(target_predcit, way_pts, visible_ps, thetas);
         visPtr_->visualize_pointcloud(visible_ps, "visible_ps");
         visPtr_->visualize_fan_shape_meshes(target_predcit, visible_ps, thetas, "visible_region");
-
-        // TODO change the final state
         std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> rays;
-        for (int i = 0; i < (int)way_pts.size(); ++i) {
+        for (int i = 0; i < static_cast<int>(way_pts.size()); ++i) {
           rays.emplace_back(target_predcit[i], way_pts[i]);
         }
         visPtr_->visualize_pointcloud(way_pts, "way_pts");
         way_pts.insert(way_pts.begin(), p_start);
-        // ros::Time t_front2 = ros::Time::now();
         envPtr_->pts2path(way_pts, path);
-        // ros::Time t_end2 = ros::Time::now();
-        // t_path += (t_end2 - t_front2).toSec() * 1e3;
       }
-      // NOTE corridor generating
+
       std::vector<Eigen::MatrixXd> hPolys;
       std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> keyPts;
-
-      // ros::Time t_front3 = ros::Time::now();
       envPtr_->generateSFC(path, 2.0, hPolys, keyPts);
-      // ros::Time t_end3 = ros::Time::now();
-      // double t_corridor = (t_end3 - t_front3).toSec() * 1e3;
-
       envPtr_->visCorridor(hPolys);
       visPtr_->visualize_pairline(keyPts, "keyPts");
 
-      // NOTE trajectory optimization
       Eigen::MatrixXd finState;
       finState.setZero(3, 3);
       finState.col(0) = path.back();
       finState.col(1) = target_v;
-      // ros::Time t_front4 = ros::Time::now();
-      if (land_triger_received_) {
+      if (snapshot.land_trigger_active) {
         finState.col(0) = target_predcit.back();
-        generate_new_traj_success = trajOptPtr_->generate_traj(iniState, finState, target_predcit, hPolys, traj);
+        generate_new_traj_success =
+            trajOptPtr_->generate_traj(iniState, finState, target_predcit, hPolys, traj);
       } else {
-        generate_new_traj_success = trajOptPtr_->generate_traj(iniState, finState,
-                                                               target_predcit, visible_ps, thetas,
-                                                               hPolys, traj);
+        generate_new_traj_success = trajOptPtr_->generate_traj(iniState, finState, target_predcit,
+                                                               visible_ps, thetas, hPolys, traj);
       }
-      // ros::Time t_end4 = ros::Time::now();
-      // double t_optimization = (t_end4 - t_front4).toSec() * 1e3;
-
-      // NOTE average calculating time of path searching, corridor generation and optimization
-
-      // t_path_ = (t_path_ * times_path_ + t_path) / (++times_path_);
-      // t_corridor_ = (t_corridor_ * times_corridor_ + t_corridor) / (++times_corridor_);
-      // t_optimization_ = (t_optimization_ * times_optimization_ + t_optimization) / (++times_optimization_);
-
-      // std::cout << "t_path_: " << t_path_ << " ms" << std::endl;
-      // std::cout << "t_corridor_: " << t_corridor_ << " ms" << std::endl;
-      // std::cout << "t_optimization_: " << t_optimization_ << " ms" << std::endl;
-
       visPtr_->visualize_traj(traj, "traj");
     }
 
-    // NOTE collision check
     bool valid = false;
     if (generate_new_traj_success) {
       valid = validcheck(traj, replan_stamp);
@@ -442,19 +490,15 @@ class Nodelet : public nodelet::Nodelet {
       replanStateMsg_.state = -2;
       replanState_pub_.publish(replanStateMsg_);
     }
+
     if (valid) {
       force_hover_ = false;
       ROS_WARN("[planner] REPLAN SUCCESS");
       replanStateMsg_.state = 0;
       replanState_pub_.publish(replanStateMsg_);
       Eigen::Vector3d dp = target_p + target_v * 0.03 - iniState.col(0);
-      // NOTE : if the drone is going to unknown areas, watch that direction
-      // Eigen::Vector3d un_known_p = traj.getPos(1.0);
-      // if (gridmapPtr_->isUnKnown(un_known_p)) {
-      //   dp = un_known_p - odom_p;
-      // }
       double yaw = std::atan2(dp.y(), dp.x());
-      if (land_triger_received_) {
+      if (snapshot.land_trigger_active) {
         yaw = 2 * std::atan2(target_q.z(), target_q.w());
       }
       pub_traj(traj, yaw, replan_stamp);
@@ -464,33 +508,25 @@ class Nodelet : public nodelet::Nodelet {
       ROS_ERROR("[planner] REPLAN FAILED, HOVERING...");
       replanStateMsg_.state = 1;
       replanState_pub_.publish(replanStateMsg_);
-      return;
     } else if (validcheck(traj_poly_, replan_stamp_)) {
       force_hover_ = true;
       ROS_FATAL("[planner] EMERGENCY STOP!!!");
       replanStateMsg_.state = 2;
       replanState_pub_.publish(replanStateMsg_);
       pub_hover_p(iniState.col(0), replan_stamp);
-      return;
     } else {
       ROS_ERROR("[planner] REPLAN FAILED, EXECUTE LAST TRAJ...");
       replanStateMsg_.state = 3;
       replanState_pub_.publish(replanStateMsg_);
-      return;  // current generated traj invalid but last is valid
     }
-    visPtr_->visualize_traj(traj, "traj");
   }
 
-  void fake_timer_callback(const ros::TimerEvent& event) {
-    heartbeat_pub_.publish(std_msgs::Empty());
-    if (!odom_received_ || !map_received_) {
+  void executeWaypoint(const PlanningSnapshot& snapshot) {
+    if (!snapshot.has_goal) {
       return;
     }
-    // obtain state of odom
-    while (odom_lock_.test_and_set())
-      ;
-    auto odom_msg = odom_msg_;
-    odom_lock_.clear();
+
+    const auto& odom_msg = snapshot.odom;
     Eigen::Vector3d odom_p(odom_msg.pose.pose.position.x,
                            odom_msg.pose.pose.position.y,
                            odom_msg.pose.pose.position.z);
@@ -498,32 +534,28 @@ class Nodelet : public nodelet::Nodelet {
                            odom_msg.twist.twist.linear.y,
                            odom_msg.twist.twist.linear.z);
 
-    // NOTE force-hover: waiting for the speed of drone small enough
     if (force_hover_ && odom_v.norm() > 0.1) {
       return;
     }
 
-    // NOTE local goal
     Eigen::Vector3d local_goal;
     Eigen::Vector3d delta = goal_ - odom_p;
-    if (delta.norm() < 15) {
+    if (delta.norm() < 15.0) {
       local_goal = goal_;
     } else {
-      local_goal = delta.normalized() * 15 + odom_p;
+      local_goal = delta.normalized() * 15.0 + odom_p;
     }
 
-    // NOTE obtain map
-    while (gridmap_lock_.test_and_set())
-      ;
-    gridmapPtr_->from_msg(map_msg_);
-    replanStateMsg_.occmap = map_msg_;
-    gridmap_lock_.clear();
+    gridmapPtr_->from_msg(snapshot.map);
+    replanStateMsg_.occmap = snapshot.map;
 
-    // NOTE determin whether to replan
+    double stop_radius = std::max(waypoint_stop_dist_, 0.0);
     bool no_need_replan = false;
     if (!force_hover_ && !wait_hover_) {
-      double last_traj_t_rest = traj_poly_.getTotalDuration() - (ros::Time::now() - replan_stamp_).toSec();
-      bool new_goal = (local_goal - traj_poly_.getPos(traj_poly_.getTotalDuration())).norm() > tracking_dist_;
+      double last_traj_t_rest =
+          traj_poly_.getTotalDuration() - (snapshot.stamp - replan_stamp_).toSec();
+      bool new_goal =
+          (local_goal - traj_poly_.getPos(traj_poly_.getTotalDuration())).norm() > stop_radius;
       if (!new_goal) {
         if (last_traj_t_rest < 1.0) {
           ROS_WARN("[planner] NEAR GOAL...");
@@ -531,7 +563,7 @@ class Nodelet : public nodelet::Nodelet {
         } else if (validcheck(traj_poly_, replan_stamp_, last_traj_t_rest)) {
           ROS_WARN("[planner] NO NEED REPLAN...");
           double t_delta = traj_poly_.getTotalDuration() < 1.0 ? traj_poly_.getTotalDuration() : 1.0;
-          double t_yaw = (ros::Time::now() - replan_stamp_).toSec() + t_delta;
+          double t_yaw = (snapshot.stamp - replan_stamp_).toSec() + t_delta;
           Eigen::Vector3d un_known_p = traj_poly_.getPos(t_yaw);
           Eigen::Vector3d dp = un_known_p - odom_p;
           double yaw = std::atan2(dp.y(), dp.x());
@@ -540,43 +572,27 @@ class Nodelet : public nodelet::Nodelet {
         }
       }
     }
-    // NOTE determin whether to pub hover
-    if ((goal_ - odom_p).norm() < tracking_dist_ + tolerance_d_ && odom_v.norm() < 0.1) {
+
+    if ((goal_ - odom_p).norm() < stop_radius && odom_v.norm() < 0.1) {
       if (!wait_hover_) {
-        pub_hover_p(odom_p, ros::Time::now());
+        pub_hover_p(odom_p, snapshot.stamp);
         wait_hover_ = true;
       }
       ROS_WARN("[planner] HOVERING...");
       replanStateMsg_.state = -1;
       replanState_pub_.publish(replanStateMsg_);
       return;
-    } else {
-      wait_hover_ = false;
     }
+
+    wait_hover_ = false;
+
     if (no_need_replan) {
       return;
     }
 
-    // NOTE replan state
-    Eigen::MatrixXd iniState;
-    iniState.setZero(3, 3);
-    ros::Time replan_stamp = ros::Time::now() + ros::Duration(0.03);
-    double replan_t = (replan_stamp - replan_stamp_).toSec();
-    if (force_hover_ || replan_t > traj_poly_.getTotalDuration()) {
-      // should replan from the hover state
-      iniState.col(0) = odom_p;
-      iniState.col(1) = odom_v;
-    } else {
-      // should replan from the last trajectory
-      iniState.col(0) = traj_poly_.getPos(replan_t);
-      iniState.col(1) = traj_poly_.getVel(replan_t);
-      iniState.col(2) = traj_poly_.getAcc(replan_t);
-    }
-    replanStateMsg_.header.stamp = ros::Time::now();
-    replanStateMsg_.iniState.resize(9);
-    Eigen::Map<Eigen::MatrixXd>(replanStateMsg_.iniState.data(), 3, 3) = iniState;
+    ros::Time replan_stamp;
+    Eigen::MatrixXd iniState = buildInitialState(odom_p, odom_v, snapshot.stamp, replan_stamp);
 
-    // NOTE generate an extra corridor
     Eigen::Vector3d p_start = iniState.col(0);
     bool need_extra_corridor = iniState.col(1).norm() > 1.0;
     Eigen::MatrixXd hPoly;
@@ -595,13 +611,12 @@ class Nodelet : public nodelet::Nodelet {
       line.second = p_start;
       envPtr_->generateOneCorridor(line, 2.0, hPoly);
     }
-    // NOTE path searching
+
     std::vector<Eigen::Vector3d> path;
     bool generate_new_traj_success = envPtr_->astar_search(p_start, local_goal, path);
     Trajectory traj;
     if (generate_new_traj_success) {
       visPtr_->visualize_path(path, "astar");
-      // NOTE corridor generating
       std::vector<Eigen::MatrixXd> hPolys;
       std::vector<std::pair<Eigen::Vector3d, Eigen::Vector3d>> keyPts;
       envPtr_->generateSFC(path, 2.0, hPolys, keyPts);
@@ -612,16 +627,13 @@ class Nodelet : public nodelet::Nodelet {
       envPtr_->visCorridor(hPolys);
       visPtr_->visualize_pairline(keyPts, "keyPts");
 
-      // NOTE trajectory optimization
       Eigen::MatrixXd finState;
       finState.setZero(3, 3);
       finState.col(0) = path.back();
-      // return;
       generate_new_traj_success = trajOptPtr_->generate_traj(iniState, finState, hPolys, traj);
       visPtr_->visualize_traj(traj, "traj");
     }
 
-    // NOTE collision check
     bool valid = false;
     if (generate_new_traj_success) {
       valid = validcheck(traj, replan_stamp);
@@ -629,13 +641,14 @@ class Nodelet : public nodelet::Nodelet {
       replanStateMsg_.state = -2;
       replanState_pub_.publish(replanStateMsg_);
     }
+
     if (valid) {
       force_hover_ = false;
       ROS_WARN("[planner] REPLAN SUCCESS");
       replanStateMsg_.state = 0;
       replanState_pub_.publish(replanStateMsg_);
-      // NOTE : if the trajectory is known, watch that direction
-      Eigen::Vector3d un_known_p = traj.getPos(traj.getTotalDuration() < 1.0 ? traj.getTotalDuration() : 1.0);
+      Eigen::Vector3d un_known_p =
+          traj.getPos(traj.getTotalDuration() < 1.0 ? traj.getTotalDuration() : 1.0);
       Eigen::Vector3d dp = un_known_p - odom_p;
       double yaw = std::atan2(dp.y(), dp.x());
       pub_traj(traj, yaw, replan_stamp);
@@ -645,22 +658,26 @@ class Nodelet : public nodelet::Nodelet {
       ROS_ERROR("[planner] REPLAN FAILED, HOVERING...");
       replanStateMsg_.state = 1;
       replanState_pub_.publish(replanStateMsg_);
-      return;
     } else if (!validcheck(traj_poly_, replan_stamp_)) {
       force_hover_ = true;
       ROS_FATAL("[planner] EMERGENCY STOP!!!");
       replanStateMsg_.state = 2;
       replanState_pub_.publish(replanStateMsg_);
       pub_hover_p(iniState.col(0), replan_stamp);
-      return;
     } else {
       ROS_ERROR("[planner] REPLAN FAILED, EXECUTE LAST TRAJ...");
       replanStateMsg_.state = 3;
       replanState_pub_.publish(replanStateMsg_);
-      return;  // current generated traj invalid but last is valid
     }
-    visPtr_->visualize_traj(traj, "traj");
   }
+
+
+
+
+
+
+
+
 
   void debug_timer_callback(const ros::TimerEvent& event) {
     inflate_gridmap_pub_.publish(replanStateMsg_.occmap);
@@ -799,9 +816,14 @@ class Nodelet : public nodelet::Nodelet {
     nh.getParam("tracking_dur", tracking_dur_);
     nh.getParam("tracking_dist", tracking_dist_);
     nh.getParam("tolerance_d", tolerance_d_);
+    if (!nh.getParam("waypoint_stop_dist", waypoint_stop_dist_)) {
+      waypoint_stop_dist_ = tracking_dist_ + tolerance_d_;
+    }
     nh.getParam("debug", debug_);
-
     nh.getParam("target_timeout", target_timeout_);
+    nh.getParam("target_speed_threshold", target_speed_threshold_);
+    nh.getParam("tracking_height_offset", tracking_height_offset_);
+    target_speed_threshold_sq_ = target_speed_threshold_ * target_speed_threshold_;
 
     gridmapPtr_ = std::make_shared<mapping::OccGridMap>();
     envPtr_ = std::make_shared<env::Env>(nh, gridmapPtr_);
@@ -821,12 +843,7 @@ class Nodelet : public nodelet::Nodelet {
       gridmapPtr_->from_msg(replanStateMsg_.occmap);
       prePtr_->setMap(*gridmapPtr_);
       std::cout << "plan state: " << replanStateMsg_.state << std::endl;
-    // } else if (fake_) {
-    //   plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::fake_timer_callback, this);
-    } 
-    else 
-    {
-      //plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::plan_timer_callback, this);
+    } else {
       plan_timer_ = nh.createTimer(ros::Duration(1.0 / plan_hz), &Nodelet::main_timer_callback, this);
     }
     gridmap_sub_ = nh.subscribe<quadrotor_msgs::OccMap3d>("gridmap_inflate", 1, &Nodelet::gridmap_callback, this, ros::TransportHints().tcpNoDelay());
@@ -844,6 +861,33 @@ class Nodelet : public nodelet::Nodelet {
   }
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
+
+
+bool planning::Nodelet::TrackingStrategy::ready(const PlanningSnapshot& snapshot) const {
+    if (!snapshot.target.fresh) {
+        return false;
+    }
+    if (snapshot.land_trigger_active) {
+        return true;
+    }
+    return snapshot.target.speed_sq >= node_.target_speed_threshold_sq_;
+}
+
+// 2. 实现 TrackingStrategy 的 run 函数
+void planning::Nodelet::TrackingStrategy::run(const PlanningSnapshot& snapshot) {
+    node_.executeTracking(snapshot);
+}
+
+// 3. 实现 WaypointStrategy 的 ready 函数
+bool planning::Nodelet::WaypointStrategy::ready(const PlanningSnapshot& snapshot) const {
+    return snapshot.has_goal;
+}
+
+// 4. 实现 WaypointStrategy 的 run 函数
+void planning::Nodelet::WaypointStrategy::run(const PlanningSnapshot& snapshot) {
+    node_.executeWaypoint(snapshot);
+}
+
 
 }  // namespace planning
 
