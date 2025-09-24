@@ -190,7 +190,7 @@ class Nodelet : public nodelet::Nodelet {
                                     // const ros::Time& stamp, ros::Time& replan_stamp);
 
   void triger_callback(const geometry_msgs::PoseStampedConstPtr& msgPtr) {
-    goal_ << msgPtr->pose.position.x, msgPtr->pose.position.y, 0.9;
+    goal_ << msgPtr->pose.position.x, msgPtr->pose.position.y, msgPtr->pose.position.z;
     triger_received_ = true;
   }
 
@@ -573,7 +573,7 @@ class Nodelet : public nodelet::Nodelet {
       }
     }
 
-    if ((goal_ - odom_p).norm() < stop_radius && odom_v.norm() < 0.1) {
+    if ((goal_ - odom_p).norm() < stop_radius && odom_v.norm() < 0.2) {
       if (!wait_hover_) {
         pub_hover_p(odom_p, snapshot.stamp);
         wait_hover_ = true;

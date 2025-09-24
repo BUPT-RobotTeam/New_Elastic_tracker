@@ -266,7 +266,7 @@ class Env {
     decomp_util.set_obs(obs_pc);
     decomp_util.dilate(line);
     Polyhedron3D poly = decomp_util.get_polyhedrons()[0];
-    compressPoly(poly, 0.1);
+    compressPoly(poly, 1);
 
     vec_E<Hyperplane3D> current_hyperplanes = poly.hyperplanes();
     hPoly.resize(6, current_hyperplanes.size());

@@ -1,5 +1,5 @@
 camera_rate: 30.0
-camera_range: 6.0
+camera_range: 10.0
 
 cam_width:  640
 cam_height: 480

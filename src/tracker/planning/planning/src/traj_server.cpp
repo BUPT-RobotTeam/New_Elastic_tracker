@@ -53,7 +53,7 @@ void publish_cmd(int traj_id,
   pose.orientation.y = 0.0;
   pose.orientation.z = std::sin(half_yaw);
   pose_cmd_pub_.publish(pose);
-  ROS_INFO("[server]pose_cmd");
+  ROS_INFO("[server]nya~pose_cmd");
 
   //-----------------------------------------
   last_p_ = p;
