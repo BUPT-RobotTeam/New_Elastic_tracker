@@ -11,6 +11,10 @@
 #include <queue>
 #include <traj_opt/geoutils.hpp>
 #include <unordered_map>
+#include <cmath>
+#include <limits>
+#include <vector>
+#include <algorithm>
 
 namespace std {
 template <typename Scalar, int Rows, int Cols>
@@ -59,6 +63,10 @@ class Env {
   std::shared_ptr<mapping::OccGridMap> mapPtr_;
   NodePtr data_[MAX_MEMORY];
   double desired_dist_, theta_clearance_, tolerance_d_;
+  double clearance_weight_ = 1.0;
+  double unknown_penalty_weight_ = 0.5;
+  double visibility_penalty_ = 0.5;
+  int clearance_check_radius_ = 2;
 
   inline NodePtr visit(const Eigen::Vector3i& idx) {
     auto iter = visited_nodes_.find(idx);
@@ -81,6 +89,10 @@ class Env {
     nh.getParam("tracking_dist", desired_dist_);
     nh.getParam("tolerance_d", tolerance_d_);
     nh.getParam("theta_clearance", theta_clearance_);
+    nh.param("clearance_penalty_weight", clearance_weight_, clearance_weight_);
+    nh.param("unknown_penalty_weight", unknown_penalty_weight_, unknown_penalty_weight_);
+    nh.param("visibility_penalty", visibility_penalty_, visibility_penalty_);
+    nh.param("clearance_check_radius", clearance_check_radius_, clearance_check_radius_);
     for (int i = 0; i < MAX_MEMORY; ++i) {
       data_[i] = new Node;
     }
@@ -407,17 +419,80 @@ class Env {
     return true;
   };
 
+  inline void getNeighbors(std::vector<std::pair<Eigen::Vector3i, double>>& neighbors) const {
+    neighbors.clear();
+    neighbors.reserve(26);
+    for (int dx = -1; dx <= 1; ++dx) {
+      for (int dy = -1; dy <= 1; ++dy) {
+        for (int dz = -1; dz <= 1; ++dz) {
+          if (dx == 0 && dy == 0 && dz == 0) {
+            continue;
+          }
+          Eigen::Vector3i offset(dx, dy, dz);
+          double cost = offset.cast<double>().norm();
+          neighbors.emplace_back(offset, cost);
+        }
+      }
+    }
+  }
+
+  inline double clearancePenalty(const Eigen::Vector3i& idx) const {
+    double min_occ = std::numeric_limits<double>::infinity();
+    double min_unknown = std::numeric_limits<double>::infinity();
+    for (int dx = -clearance_check_radius_; dx <= clearance_check_radius_; ++dx) {
+      for (int dy = -clearance_check_radius_; dy <= clearance_check_radius_; ++dy) {
+        for (int dz = -clearance_check_radius_; dz <= clearance_check_radius_; ++dz) {
+          if (dx == 0 && dy == 0 && dz == 0) {
+            continue;
+          }
+          Eigen::Vector3i neighbor = idx + Eigen::Vector3i(dx, dy, dz);
+          double dist = std::sqrt(static_cast<double>(dx * dx + dy * dy + dz * dz));
+          if (dist < 1e-6) {
+            continue;
+          }
+          if (mapPtr_->isOccupied(neighbor)) {
+            min_occ = std::min(min_occ, dist);
+          } else if (mapPtr_->isUnKnown(neighbor)) {
+            min_unknown = std::min(min_unknown, dist);
+          }
+        }
+      }
+    }
+    double penalty = 0.0;
+    if (std::isfinite(min_occ)) {
+      double clearance = min_occ * mapPtr_->resolution;
+      penalty += clearance_weight_ / (clearance + 1e-3);
+    }
+    if (std::isfinite(min_unknown)) {
+      double clearance = min_unknown * mapPtr_->resolution;
+      penalty += unknown_penalty_weight_ / (clearance + 1e-3);
+    }
+    return penalty;
+  }
+
   inline bool findVisiblePath(const Eigen::Vector3i& start_idx,
                               const Eigen::Vector3i& end_idx,
                               std::vector<Eigen::Vector3i>& idx_path) {
     double stop_dist = desired_dist_ / mapPtr_->resolution;
     auto stopCondition = [&](const NodePtr& ptr) -> bool {
-      return ptr->h < tolerance_d_ / mapPtr_->resolution && rayValid(ptr->idx, end_idx);
+      Eigen::Vector3i dp = end_idx - ptr->idx;
+      double dist_xy = dp.head(2).cast<double>().norm() * mapPtr_->resolution;
+      double dist_z = std::fabs(dp.z()) * mapPtr_->resolution;
+      double reach = std::max(dist_xy, dist_z);
+      return reach < tolerance_d_ && rayValid(ptr->idx, end_idx);
     };
     auto calulateHeuristic = [&](const NodePtr& ptr) {
       Eigen::Vector3i dp = end_idx - ptr->idx;
       double dr = dp.head(2).norm();
-      double lambda = 1 - stop_dist / dr;
+      double lambda = 0.0;
+      if (dr > 1e-3) {
+        lambda = 1 - stop_dist / dr;
+        if (lambda < 0.0) {
+          lambda = 0.0;
+        } else if (lambda > 1.0) {
+          lambda = 1.0;
+        }
+      }
       double dx = lambda * dp.x();
       double dy = lambda * dp.y();
       double dz = dp.z();
@@ -426,18 +501,15 @@ class Env {
       double dy0 = (start_idx - end_idx).y();
       double cross = fabs(dx * dy0 - dy * dx0) + abs(dz);
       ptr->h += 0.001 * cross;
+      ptr->h += clearancePenalty(ptr->idx);
+      if (!rayValid(ptr->idx, end_idx)) {
+        ptr->h += visibility_penalty_;
+      }
     };
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    // NOTE 6-connected graph
-    for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i neighbor(0, 0, 0);
-      neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
-      neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
-    }
+    getNeighbors(neighbors);
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
     // NOTE we should permit the start pos invalid! (for corridor generation)
@@ -537,7 +609,9 @@ class Env {
                            const Eigen::Vector3i& end_idx,
                            std::vector<Eigen::Vector3i>& idx_path) {
     auto stopCondition = [&](const NodePtr& ptr) -> bool {
-      return ptr->h < desired_dist_ / mapPtr_->resolution;
+      Eigen::Vector3i dp = end_idx - ptr->idx;
+      double dist = dp.cast<double>().norm() * mapPtr_->resolution;
+      return dist < desired_dist_;
     };
     auto calulateHeuristic = [&](const NodePtr& ptr) {
       Eigen::Vector3i dp = end_idx - ptr->idx;
@@ -549,18 +623,12 @@ class Env {
       double dy0 = (start_idx - end_idx).y();
       double cross = fabs(dx * dy0 - dy * dx0) + abs(dz);
       ptr->h += 0.001 * cross;
+      ptr->h += clearancePenalty(ptr->idx);
     };
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    // NOTE 6-connected graph
-    for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i neighbor(0, 0, 0);
-      neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
-      neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
-    }
+    getNeighbors(neighbors);
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
     // NOTE we should permit the start pos invalid! (for corridor generation)
@@ -736,18 +804,12 @@ class Env {
       double dy0 = (start_idx - end_idx).y();
       double cross = fabs(dx * dy0 - dy * dx0) + abs(dz);
       ptr->h += 0.001 * cross;
+      ptr->h += clearancePenalty(ptr->idx);
     };
     // initialization of datastructures
     std::priority_queue<NodePtr, std::vector<NodePtr>, NodeComparator> open_set;
     std::vector<std::pair<Eigen::Vector3i, double>> neighbors;
-    // NOTE 6-connected graph
-    for (int i = 0; i < 3; ++i) {
-      Eigen::Vector3i neighbor(0, 0, 0);
-      neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
-      neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
-    }
+    getNeighbors(neighbors);
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
     // NOTE we should permit the start pos invalid! (for corridor generation)

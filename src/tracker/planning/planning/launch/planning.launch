@@ -4,7 +4,7 @@
   <arg name="rhoTracking_"/>
   <arg name="target_name_"/>
   <arg name="odom_topic_" default="/iris_0/mavros/vision_odom/odom"/>
-  <arg name="tracking_xy_weight" default="3"/>
+  <arg name="tracking_xy_weight" default="10"/>
   <arg name="tracking_z_weight" default="0.2"/>
 
   <!-- <node pkg="nodelet" type="nodelet" name="plan_manage" args="manager" output="screen">
@@ -35,6 +35,13 @@
     <param name="tracking_xy_weight" value="$(arg tracking_xy_weight)"/>
     <param name="tracking_z_weight" value="$(arg tracking_z_weight)"/>
     <param name="theta_clearance" value="0.8"/>
+
+    <param name="clearance_penalty_weight" value="1"/>
+    <param name="unknown_penalty_weight" value="0.1"/>
+    <param name="visibility_penalty" value="2.5"/>
+    <param name="clearance_check_radius" value="4"/>
+
+
     <param name="clearance_d" value="0.2"/>
     <param name="tolerance_d" value="0.5"/>
     <param name="tracking_dist" value="3.0"/>
