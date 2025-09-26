@@ -33,10 +33,10 @@
       <param name="p_occ" value=" 139"/>
       <param name="p_def" value="-199"/>
       <!-- mapping parameters -->
-      <param name="resolution" value="0.15"/>
-      <param name="local_x" value="20"/>
-      <param name="local_y" value="20"/>
-      <param name="local_z" value="5"/>
+      <param name="resolution" value="0.5"/>
+      <param name="local_x" value="30"/>
+      <param name="local_y" value="30"/>
+      <param name="local_z" value="10"/>
       <param name="inflate_size" value="1"/>
       <!-- use mask -->
       <param name="use_mask" value="true"/>

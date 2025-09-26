@@ -73,6 +73,10 @@ class Nodelet : public nodelet::Nodelet {
   std::atomic_flag target_lock_ = ATOMIC_FLAG_INIT;
   Eigen::Vector3d target_odom_;
 
+  bool enable_virtual_wall_ = false;
+  double virtual_ground_ = -1000.0;
+  double virtual_ceil_ = 1000.0;
+
   OccGridMap gridmap_;
   int inflate_size_;
 
@@ -138,7 +142,9 @@ class Nodelet : public nodelet::Nodelet {
           }
         }
         if (good_point) {
-          obs_pts.push_back(p);
+          if (!enable_virtual_wall_ || (p.z() > virtual_ground_ && p.z() < virtual_ceil_)) {
+            obs_pts.push_back(p);
+          }
         }
       }
     }
@@ -209,7 +215,9 @@ class Nodelet : public nodelet::Nodelet {
     pcl::fromROSMsg(*msgPtr, point_cloud);
     for (const auto& pt : point_cloud) {
       Eigen::Vector3d p(pt.x, pt.y, pt.z);
-      gridmap_.setOcc(p);
+      if (!enable_virtual_wall_ || (p.z() > virtual_ground_ && p.z() < virtual_ceil_)) {
+        gridmap_.setOcc(p);
+      }
     }
     gridmap_.inflate(inflate_size_);
     ROS_WARN("[mapping] GLOBAL MAP REVIEVED!");
@@ -283,6 +291,10 @@ class Nodelet : public nodelet::Nodelet {
       nh.getParam("p_def", p_def);
       gridmap_.setupP(p_min, p_max, p_hit, p_mis, p_occ, p_def);
     }
+    nh.param("enable_virtual_wall", enable_virtual_wall_, false);
+    nh.param("virtual_ground", virtual_ground_, -1000.0);
+    nh.param("virtual_ceil", virtual_ceil_, 1000.0);
+    gridmap_.setVirtualWall(enable_virtual_wall_, virtual_ground_, virtual_ceil_);
     gridmap_.inflate_size = inflate_size_;
     // use mask parameter
     nh.getParam("use_mask", use_mask_);

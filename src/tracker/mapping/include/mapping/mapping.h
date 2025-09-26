@@ -2,6 +2,8 @@
 #include <sensor_msgs/PointCloud2.h>
 
 #include <Eigen/Core>
+#include <algorithm>
+#include <limits>
 #include <vector>
 
 namespace mapping {
@@ -64,6 +66,10 @@ struct OccGridMap {
   // ring buffer
   double resolution;
   int size_x, size_y, size_z;
+  // virtual wall configuration
+  bool enable_virtual_wall = false;
+  double virtual_ground = -std::numeric_limits<double>::infinity();
+  double virtual_ceil = std::numeric_limits<double>::infinity();
 
  private:
   RingBuffer<int8_t> infocc;  // -128 ~ 127  1 for occupied, 0 for known, -1 for free
@@ -99,6 +105,19 @@ struct OccGridMap {
     pro.setup(size_x, size_y, size_z);
     pro.fillData(p_def);
     sensor_range = cam_range;
+  }
+  inline void setVirtualWall(bool enable, double ground, double ceil) {
+    enable_virtual_wall = enable;
+    if (enable_virtual_wall) {
+      virtual_ground = ground;
+      virtual_ceil = ceil;
+      if (virtual_ground > virtual_ceil) {
+        std::swap(virtual_ground, virtual_ceil);
+      }
+    } else {
+      virtual_ground = -std::numeric_limits<double>::infinity();
+      virtual_ceil = std::numeric_limits<double>::infinity();
+    }
   }
   inline void setupP(const int& _p_min,
                      const int& _p_max,
@@ -239,13 +258,31 @@ struct OccGridMap {
 
  public:
   inline const bool isOccupied(const Eigen::Vector3i& id) const {
-    return isInMap(id) && infocc.atId(id) == 1;
+    if (!isInMap(id)) {
+      return false;
+    }
+    if (enable_virtual_wall) {
+      double z = idx2pos(id).z();
+      if (!(z > virtual_ground && z < virtual_ceil)) {
+        return false;
+      }
+    }
+    return infocc.atId(id) == 1;
   }
   inline const bool isOccupied(const Eigen::Vector3d& p) const {
     return isOccupied(pos2idx(p));
   }
   inline const bool isUnKnown(const Eigen::Vector3i& id) const {
-    return (!isInMap(id)) || infocc.atId(id) == 0;
+    if (!isInMap(id)) {
+      return true;
+    }
+    if (enable_virtual_wall) {
+      double z = idx2pos(id).z();
+      if (!(z > virtual_ground && z < virtual_ceil)) {
+        return true;
+      }
+    }
+    return infocc.atId(id) == 0;
   }
   inline const bool isUnKnown(const Eigen::Vector3d& p) const {
     return isUnKnown(pos2idx(p));

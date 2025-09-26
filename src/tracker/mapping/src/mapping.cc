@@ -93,6 +93,9 @@ void OccGridMap::updateMap(const Eigen::Vector3d& sensor_p,
   for (const auto& p : pc) {
     Eigen::Vector3d pt;
     bool inrange = filter(sensor_p, p, pt);
+    if (enable_virtual_wall && (pt.z() <= virtual_ground || pt.z() >= virtual_ceil)) {
+      continue;
+    }
     Eigen::Vector3i idx = pos2idx(pt);
     if (vis.atId(idx) != 1) {
       if (inrange) {
@@ -148,7 +151,9 @@ void OccGridMap::occ2pc(sensor_msgs::PointCloud2& msg) {
           pt.x = (offset_x + x + 0.5) * resolution;
           pt.y = (offset_y + y + 0.5) * resolution;
           pt.z = (offset_z + z + 0.5) * resolution;
-          pcd.push_back(pt);
+          if (!enable_virtual_wall || (pt.z > virtual_ground && pt.z < virtual_ceil)) {
+            pcd.push_back(pt);
+          }
         }
       }
     }
@@ -171,7 +176,8 @@ void OccGridMap::occ2pc(sensor_msgs::PointCloud2& msg, double floor, double ceil
           pt.x = (offset_x + x + 0.5) * resolution;
           pt.y = (offset_y + y + 0.5) * resolution;
           pt.z = (offset_z + z + 0.5) * resolution;
-          if (pt.z > floor && pt.z < ceil) {
+          if (pt.z > floor && pt.z < ceil &&
+              (!enable_virtual_wall || (pt.z > virtual_ground && pt.z < virtual_ceil))) {
             pcd.push_back(pt);
           }
         }
