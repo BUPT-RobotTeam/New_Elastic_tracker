@@ -16,6 +16,8 @@ class TrajOpt {
   double vmax_, amax_;
   double rhoP_, rhoV_, rhoA_;
   double rhoTracking_, rhosVisibility_;
+  double tracking_xy_weight_ = 1.0;
+  double tracking_z_weight_ = 1.0;
   double clearance_d_, tolerance_d_, theta_clearance_;
   // corridor
   std::vector<Eigen::MatrixXd> cfgVs_;

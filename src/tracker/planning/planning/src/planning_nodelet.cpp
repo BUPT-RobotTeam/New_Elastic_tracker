@@ -124,6 +124,7 @@ class Nodelet : public nodelet::Nodelet {
   quadrotor_msgs::OccMap3d occmap_msg_;
 
   double tracking_dur_, tracking_dist_, tolerance_d_;
+  double waypoint_segment_length_ = 15.0;
   double waypoint_stop_dist_ = 0.0;
 
   Trajectory traj_poly_;
@@ -540,10 +541,11 @@ class Nodelet : public nodelet::Nodelet {
 
     Eigen::Vector3d local_goal;
     Eigen::Vector3d delta = goal_ - odom_p;
-    if (delta.norm() < 15.0) {
+    double max_segment = waypoint_segment_length_ > 0.0 ? waypoint_segment_length_ : 15.0;
+    if (delta.norm() < max_segment) {
       local_goal = goal_;
     } else {
-      local_goal = delta.normalized() * 15.0 + odom_p;
+      local_goal = delta.normalized() * max_segment + odom_p;
     }
 
     gridmapPtr_->from_msg(snapshot.map);
@@ -816,6 +818,7 @@ class Nodelet : public nodelet::Nodelet {
     nh.getParam("tracking_dur", tracking_dur_);
     nh.getParam("tracking_dist", tracking_dist_);
     nh.getParam("tolerance_d", tolerance_d_);
+    nh.getParam("waypoint_segment_length", waypoint_segment_length_);
     if (!nh.getParam("waypoint_stop_dist", waypoint_stop_dist_)) {
       waypoint_stop_dist_ = tracking_dist_ + tolerance_d_;
     }

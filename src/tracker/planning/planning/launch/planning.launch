@@ -4,6 +4,8 @@
   <arg name="rhoTracking_"/>
   <arg name="target_name_"/>
   <arg name="odom_topic_" default="/iris_0/mavros/vision_odom/odom"/>
+  <arg name="tracking_xy_weight" default="3"/>
+  <arg name="tracking_z_weight" default="0.2"/>
 
   <!-- <node pkg="nodelet" type="nodelet" name="plan_manage" args="manager" output="screen">
     <param name="num_worker_threads" value="16"/>
@@ -30,12 +32,15 @@
     <param name="rhoA" value="1000.0"/>
     <param name="rhoTracking" value="$(arg rhoTracking_)"/>
     <param name="rhosVisibility" value="$(arg rhosVisibility_)"/>
+    <param name="tracking_xy_weight" value="$(arg tracking_xy_weight)"/>
+    <param name="tracking_z_weight" value="$(arg tracking_z_weight)"/>
     <param name="theta_clearance" value="0.8"/>
     <param name="clearance_d" value="0.2"/>
     <param name="tolerance_d" value="0.5"/>
     <param name="tracking_dist" value="3.0"/>
     <param name="tracking_dur" value="3.0"/>
     <param name="tracking_dt" value="0.2"/>
+    <param name="waypoint_segment_length" value="20"/>
     <param name="debug" value="false"/>
     <param name="target_timeout" value="2"/>
     <param name="waypoint_stop_dist" value="0.5"/>
