@@ -7,6 +7,8 @@
 #include <sensor_msgs/point_cloud_conversion.h>
 
 #include <Eigen/Core>
+#include <algorithm>
+#include <limits>
 #include <memory>
 #include <queue>
 #include <traj_opt/geoutils.hpp>
@@ -59,6 +61,7 @@ class Env {
   std::shared_ptr<mapping::OccGridMap> mapPtr_;
   NodePtr data_[MAX_MEMORY];
   double desired_dist_, theta_clearance_, tolerance_d_;
+  double vertical_penalty_ = 2.0;
 
   inline NodePtr visit(const Eigen::Vector3i& idx) {
     auto iter = visited_nodes_.find(idx);
@@ -81,6 +84,8 @@ class Env {
     nh.getParam("tracking_dist", desired_dist_);
     nh.getParam("tolerance_d", tolerance_d_);
     nh.getParam("theta_clearance", theta_clearance_);
+    nh.param("vertical_step_penalty", vertical_penalty_, 2.0);
+    vertical_penalty_ = std::max(1.0, vertical_penalty_);
     for (int i = 0; i < MAX_MEMORY; ++i) {
       data_[i] = new Node;
     }
@@ -417,7 +422,10 @@ class Env {
     auto calulateHeuristic = [&](const NodePtr& ptr) {
       Eigen::Vector3i dp = end_idx - ptr->idx;
       double dr = dp.head(2).norm();
-      double lambda = 1 - stop_dist / dr;
+      double lambda = 0.0;
+      if (dr > std::numeric_limits<double>::epsilon()) {
+        lambda = std::max(0.0, 1.0 - stop_dist / dr);
+      }
       double dx = lambda * dp.x();
       double dy = lambda * dp.y();
       double dz = dp.z();
@@ -434,9 +442,10 @@ class Env {
     for (int i = 0; i < 3; ++i) {
       Eigen::Vector3i neighbor(0, 0, 0);
       neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
+      double cost = (i == 2) ? vertical_penalty_ : 1.0;
+      neighbors.emplace_back(neighbor, cost);
       neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
+      neighbors.emplace_back(neighbor, cost);
     }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
@@ -557,9 +566,10 @@ class Env {
     for (int i = 0; i < 3; ++i) {
       Eigen::Vector3i neighbor(0, 0, 0);
       neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
+      double cost = (i == 2) ? vertical_penalty_ : 1.0;
+      neighbors.emplace_back(neighbor, cost);
       neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
+      neighbors.emplace_back(neighbor, cost);
     }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);
@@ -744,9 +754,10 @@ class Env {
     for (int i = 0; i < 3; ++i) {
       Eigen::Vector3i neighbor(0, 0, 0);
       neighbor[i] = 1;
-      neighbors.emplace_back(neighbor, 1);
+      double cost = (i == 2) ? vertical_penalty_ : 1.0;
+      neighbors.emplace_back(neighbor, cost);
       neighbor[i] = -1;
-      neighbors.emplace_back(neighbor, 1);
+      neighbors.emplace_back(neighbor, cost);
     }
     bool ret = false;
     NodePtr curPtr = visit(start_idx);

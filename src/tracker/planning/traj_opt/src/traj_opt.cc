@@ -265,13 +265,6 @@ TrajOpt::TrajOpt(ros::NodeHandle& nh) : nh_(nh) {
   nh.getParam("theta_clearance", theta_clearance_);
   nh.getParam("rhoV", rhoV_);
   nh.getParam("rhoA", rhoA_);
-  nh.param("tracking_xy_weight", tracking_xy_weight_, 1.0);
-  nh.param("tracking_z_weight", tracking_z_weight_, 1.0);
-<<<<<<< ours
-=======
-  nh.param("tracking_goal_relax_distance", tracking_goal_relax_distance_, 0.0);
-  nh.param("tracking_goal_relax_weight", tracking_goal_relax_weight_, 1.0);
->>>>>>> theirs
   nh.getParam("tracking_dur", tracking_dur_);
   nh.getParam("tracking_dist", tracking_dist_);
   nh.getParam("tracking_dt", tracking_dt_);
@@ -635,58 +628,35 @@ bool TrajOpt::grad_cost_p_tracking(const Eigen::Vector3d& p,
   lower = lower * lower;
 
   Eigen::Vector3d dp = (p - target_p);
-  double dr2 = dp.head<2>().squaredNorm();
+  double dr2 = dp.head(2).squaredNorm();
   double dz2 = dp.z() * dp.z();
 
-<<<<<<< ours
-=======
-  double planar_dist = sqrt(dr2);
-  double relax_scale = goalRelaxScale(planar_dist);
-
->>>>>>> theirs
-  bool ret = false;
-  Eigen::Vector2d grad_xy = Eigen::Vector2d::Zero();
-  double grad_z = 0.0;
-  double cost_xy = 0.0;
-  double cost_z = 0.0;
+  bool ret;
+  gradp.setZero();
+  costp = 0;
 
   double pen = dr2 - upper;
   if (pen > 0) {
     double grad;
-<<<<<<< ours
-    cost_xy += penF(pen, grad);
-    grad_xy += 2 * grad * dp.head<2>();
-=======
-    cost_xy += relax_scale * penF(pen, grad);
-    grad_xy += relax_scale * 2 * grad * dp.head<2>();
->>>>>>> theirs
+    costp += penF(pen, grad);
+    gradp.head(2) += 2 * grad * dp.head(2);
     ret = true;
   } else {
     pen = lower - dr2;
     if (pen > 0) {
       double pen2 = pen * pen;
-      grad_xy -= 6 * pen2 * dp.head<2>();
-      cost_xy += pen2 * pen;
+      gradp.head(2) -= 6 * pen2 * dp.head(2);
+      costp += pen2 * pen;
       ret = true;
     }
   }
   pen = dz2 - tolerance_d_ * tolerance_d_;
   if (pen > 0) {
     double pen2 = pen * pen;
-<<<<<<< ours
-    grad_z += 6 * pen2 * dp.z();
-    cost_z += pen * pen2;
-=======
-    grad_z += relax_scale * 6 * pen2 * dp.z();
-    cost_z += relax_scale * pen * pen2;
->>>>>>> theirs
+    gradp.z() += 6 * pen2 * dp.z();
+    costp += pen * pen2;
     ret = true;
   }
-
-  gradp.setZero();
-  gradp.head<2>() = tracking_xy_weight_ * grad_xy;
-  gradp.z() = tracking_z_weight_ * grad_z;
-  costp = tracking_xy_weight_ * cost_xy + tracking_z_weight_ * cost_z;
 
   gradp *= rhoTracking_;
   costp *= rhoTracking_;
@@ -702,31 +672,24 @@ bool TrajOpt::grad_cost_p_landing(const Eigen::Vector3d& p,
   double dr2 = dp.head(2).squaredNorm();
   double dz2 = dp.z() * dp.z();
 
-  bool ret = false;
-  Eigen::Vector2d grad_xy = Eigen::Vector2d::Zero();
-  double grad_z = 0.0;
-  double cost_xy = 0.0;
-  double cost_z = 0.0;
+  bool ret;
+  gradp.setZero();
+  costp = 0;
 
   double pen = dr2 - tolerance_d_ * tolerance_d_;
   if (pen > 0) {
     double pen2 = pen * pen;
-    grad_xy += 6 * pen2 * dp.head<2>();
-    cost_xy += pen * pen2;
+    gradp.head(2) += 6 * pen2 * dp.head(2);
+    costp += pen * pen2;
     ret = true;
   }
   pen = dz2 - tolerance_d_ * tolerance_d_;
   if (pen > 0) {
     double pen2 = pen * pen;
-    grad_z += 6 * pen2 * dp.z();
-    cost_z += pen * pen2;
+    gradp.z() += 6 * pen2 * dp.z();
+    costp += pen * pen2;
     ret = true;
   }
-
-  gradp.setZero();
-  gradp.head<2>() = tracking_xy_weight_ * grad_xy;
-  gradp.z() = tracking_z_weight_ * grad_z;
-  costp = tracking_xy_weight_ * cost_xy + tracking_z_weight_ * cost_z;
 
   gradp *= rhoTracking_;
   costp *= rhoTracking_;
@@ -759,41 +722,6 @@ bool TrajOpt::grad_cost_visibility(const Eigen::Vector3d& p,
   } else {
     return false;
   }
-}
-
-double TrajOpt::goalRelaxScale(double planar_dist) const {
-  if (tracking_goal_relax_distance_ <= 1e-3) {
-    return 1.0;
-  }
-
-  double clamped_weight = tracking_goal_relax_weight_;
-  if (clamped_weight < 0.0) {
-    clamped_weight = 0.0;
-  } else if (clamped_weight > 1.0) {
-    clamped_weight = 1.0;
-  }
-
-  if (clamped_weight >= 0.999) {
-    return 1.0;
-  }
-
-  double desired_upper = tracking_dist_ + tolerance_d_;
-  double over_dist = planar_dist - desired_upper;
-  if (over_dist <= 0.0) {
-    return 1.0;
-  }
-
-  double relax_window = tracking_goal_relax_distance_;
-  if (relax_window < 1e-3) {
-    relax_window = 1e-3;
-  }
-
-  if (over_dist >= relax_window) {
-    return clamped_weight;
-  }
-
-  double ratio = over_dist / relax_window;
-  return 1.0 - (1.0 - clamped_weight) * ratio;
 }
 
 bool TrajOpt::grad_cost_v(const Eigen::Vector3d& v,

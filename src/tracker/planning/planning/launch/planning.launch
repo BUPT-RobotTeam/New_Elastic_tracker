@@ -38,6 +38,7 @@
     <param name="clearance_d" value="0.2"/>
     <param name="tolerance_d" value="0.5"/>
     <param name="tracking_dist" value="3.0"/>
+    <param name="vertical_step_penalty" value="2"/>
     <param name="tracking_dur" value="3.0"/>
     <param name="tracking_dt" value="0.2"/>
     <param name="waypoint_segment_length" value="20"/>
